@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Lade Coder – HTML/CSS/JS Only</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    body{background:#0d0d0f;color:#f5f5f5;font-family:'Segoe UI',sans-serif;}
+    .glass{background:rgba(255,255,255,.06);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.08);}
+    .glow{box-shadow:0 0 15px #00f5ff,0 0 30px #00f5ff33;}
+    .btn-glow{background:linear-gradient(135deg,#ff00ff 0%,#00f5ff 100%);color:#000;font-weight:700;border-radius:9999px;padding:.5rem 1.25rem;transition:.3s;}
+    .btn-glow:hover{transform:scale(1.08);filter:brightness(1.2);}
+    .restore-btn{position:fixed;top:1rem;right-20 z-50 bg-#ff007a text-white rounded-full w-12 h-12 text-xl disabled:opacity-40}
+    .download-btn{position:fixed;top-1 right-1 z-50 bg-cyan-400 text-black rounded-full w-12 h-12 text-xl}
+  </style>
+</head>
+<body class="min-h-screen flex items-center justify-center">
+
+<!--  INITIAL VIEW  -->
+<div id="initial-view" class="flex flex-col items-center gap-6 p-4">
+  <h1 class="text-5xl font-black bg-gradient-to-r from-pink-500 via-purple-500 to-cyan-400 bg-clip-text text-transparent animate-pulse">
+    Lade Coder
+  </h1>
+  <form id="initial-form" class="flex flex-col gap-4 w-full max-w-md">
+    <select id="model-select" class="glass rounded-lg px-4 py-2 outline-none">
+      <option value="qwen-coder">🤖 Qwen3-Coder (HTML only)</option>
+      <option value="kimi-dev">🌙 Kimi-72B (HTML only)</option>
+      <option value="hf-dialo">💬 DialoGPT (HTML only)</option>
+    </select>
+    <input id="initial-input" class="glass rounded-lg px-4 py-2 outline-none" placeholder="Describe what you want to build…" required/>
+    <button type="submit" class="btn-glow">Generate ✨</button>
+  </form>
+</div>
+
+<!--  WORKSPACE  -->
+<div id="workspace" class="hidden w-full h-screen flex">
+  <!-- Chat panel -->
+  <div class="w-1/3 flex flex-col">
+    <div id="chat-log" class="flex-1 overflow-y-auto p-3 space-y-3 glass border-r border-gray-700"></div>
+    <form id="chat-form" class="flex gap-2 p-3 glass border-r border-gray-700">
+      <input id="chat-input" class="flex-1 glass rounded-full px-4 py-2 outline-none" placeholder="Tell me what to change…"/>
+      <button class="btn-glow !p-2"><i data-lucide="send" class="w-5 h-5"></i></button>
+    </form>
+  </div>
+
+  <!-- Preview/Code panel -->
+  <div class="flex-1 flex flex-col">
+    <div class="flex gap-2 p-3 border-b border-gray-700">
+      <button id="preview-tab" class="tab-btn glow">Preview</button>
+      <button id="code-tab"  class="tab-btn glass">Code</button>
+    </div>
+    <div class="flex-1 relative">
+      <iframe id="preview-frame" class="w-full h-full" sandbox="allow-scripts allow-same-origin"></iframe>
+      <pre id="code-block" class="hidden w-full h-full overflow-y-auto p-4 text-sm bg-gray-900"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- Action buttons -->
+<button id="restore-btn" class="restore-btn" disabled title="Undo ↶">↶</button>
+<button id="download-btn" class="download-btn" title="Download .zip">⬇</button>
+
+<script>
+lucide.createIcons();
+
+const OPEN_KEY = "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";
+const HF_KEY   = "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";
+
+let currentModel = '';
+let codeHistory  = [];
+let currentCode  = '';
+
+const initialView = document.getElementById('initial-view');
+const workspace   = document.getElementById('workspace');
+const initialForm = document.getElementById('initial-form');
+const modelSelect = document.getElementById('model-select');
+const initialInput= document.getElementById('initial-input');
+const chatForm    = document.getElementById('chat-form');
+const chatInput   = document.getElementById('chat-input');
+const chatLog     = document.getElementById('chat-log');
+const previewFrame= document.getElementById('preview-frame');
+const codeBlock   = document.getElementById('code-block');
+const restoreBtn  = document.getElementById('restore-btn');
+const downloadBtn = document.getElementById('download-btn');
+
+function addMsg(text, who){
+  const div = document.createElement('div');
+  div.className = `flex ${who==='user'?'justify-end':'justify-start'}`;
+  const bubble = document.createElement('div');
+  bubble.className = `max-w-xs lg:max-w-md px-3 py-1.5 rounded-lg ${who==='user'?'bg-pink-500 text-white':'bg-gray-600'}`;
+  bubble.textContent = text;
+  div.appendChild(bubble);
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return bubble;
+}
+function pushHistory(code){ codeHistory.push(code); restoreBtn.disabled=false; }
+function setCode(html){ currentCode=html; previewFrame.srcdoc=html; codeBlock.textContent=html; }
+
+/* ---------- STREAMING OPENROUTER ---------- */
+async function streamOpenRouter(prompt, model, onChunk, onEnd){
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method:"POST",
+    headers:{ Authorization:`Bearer ${OPEN_KEY}`, "Content-Type":"application/json" },
+    body:JSON.stringify({ model, messages:[{role:"user", content:prompt}], stream:true })
+  });
+  const reader=res.body.getReader(); const dec=new TextDecoder(); let acc="";
+  while(true){
+    const {value,done}=await reader.read(); if(done) break;
+    acc+=dec.decode(value,{stream:true});
+    for(const line of acc.split("\n")){
+      if(!line.startsWith("data: ")) continue;
+      const data=line.slice(6);
+      if(data==="[DONE]"){ onEnd(); return; }
+      try{
+        const json=JSON.parse(data);
+        const chunk=json.choices?.[0]?.delta?.content||"";
+        onChunk(chunk);
+      }catch{}
+    }
+    acc="";
+  }
+  onEnd();
+}
+
+/* ---------- GENERATE ---------- */
+async function generate(prompt){
+  const bubble = addMsg("⏳ Generating…",'ai');
+  let raw="";
+  const extract=t=> (t.match(/```(?:html|css|javascript|js)?\n([\s\S]*?)\n```/)||[,t])[1].trim();
+
+  if(currentModel==="qwen-coder"){
+    let acc="";
+    await streamOpenRouter(prompt,"qwen/qwen3-coder:free",
+      chunk=>{ acc+=chunk; const html=extract(acc); setCode(html); },
+      ()=>{ bubble.textContent="✅ Done!"; pushHistory(currentCode); }
+    );
+  }else{
+    if(currentModel==="kimi-dev") raw=await fetch("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${OPEN_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:"moonshotai/kimi-dev-72b:free",messages:[{role:"user",content:prompt}]})}).then(r=>r.json()).then(d=>d.choices?.[0]?.message?.content||"");
+    else raw=await fetch("https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium",{method:"POST",headers:{Authorization:`Bearer ${HF_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({inputs:prompt})}).then(r=>r.json()).then(d=>Array.isArray(d)?d[0]?.generated_text||"":"");
+
+    const html=extract(raw);
+    setCode(html);
+    bubble.textContent="✅ Done!";
+    pushHistory(currentCode);
+  }
+}
+
+/* ---------- DOWNLOAD ---------- */
+downloadBtn.onclick=async()=>{
+  const zip=new JSZip(); zip.file("index.html",currentCode);
+  const blob=await zip.generateAsync({type:"blob"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="lade-coder.zip"; a.click(); URL.revokeObjectURL(a.href);
+};
+
+/* ---------- INITIAL SUBMIT ---------- */
+initialForm.addEventListener('submit',e=>{
+  e.preventDefault();
+  const prompt=initialInput.value.trim();
+  if(!prompt) return;
+  currentModel=modelSelect.value;
+  initialView.classList.add('opacity-0','scale-95');
+  setTimeout(()=>{
+    initialView.classList.add('hidden');
+    workspace.classList.remove('hidden');
+    addMsg(prompt,'user');
+    generate(prompt);
+  },400);
+});
+
+/* ---------- FOLLOW-UP ---------- */
+chatForm.addEventListener('submit',e=>{
+  e.preventDefault();
+  const prompt=chatInput.value.trim();
+  if(!prompt) return;
+  addMsg(prompt,'user');
+  chatInput.value='';
+  const fullPrompt=`Current code:\n\`\`\`html\n${currentCode}\n\`\`\`\n\nUser request: ${prompt}\n\nReturn only the updated full HTML/CSS/JS inside \`\`\`html block.`;
+  generate(fullPrompt);
+});
+
+/* ---------- TABS ---------- */
+document.getElementById('preview-tab').onclick=()=>{
+  previewFrame.classList.remove('hidden');
+  codeBlock.classList.add('hidden');
+  document.getElementById('preview-tab').classList.add('glow');
+  document.getElementById('code-tab').classList.remove('glow');
+};
+document.getElementById('code-tab').onclick=()=>{
+  codeBlock.classList.remove('hidden');
+  previewFrame.classList.add('hidden');
+  document.getElementById('code-tab').classList.add('glow');
+  document.getElementById('preview-tab').classList.remove('glow');
+};
+
+/* ---------- RESTORE ---------- */
+restoreBtn.addEventListener('click',()=>{
+  if(codeHistory.length<2) return;
+  codeHistory.pop();
+  setCode(codeHistory[codeHistory.length-1]);
+});
+</script>
+</body>
+</html>
